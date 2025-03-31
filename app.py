@@ -151,4 +151,4 @@ if __name__ == '__main__':
     # print("* Press CTRL+C to quit\n")
         
     # Run app with host='0.0.0.0' to allow external access
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
