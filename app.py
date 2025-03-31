@@ -7,7 +7,6 @@ import os
 import logging
 import sys
 import traceback
-#from pyngrok import ngrok
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -23,7 +22,7 @@ app = Flask(__name__)
 
 # Configuration
 UPLOAD_FOLDER = os.path.join(current_dir, 'static', 'uploads')
-DATABASE_PATH = r"C:\Users\李晓璇\Desktop\Semester 4\CS6123\project_3\spriters\Mixed"
+DATABASE_PATH = r"D:\web_app\database"
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 
 # Create directories
@@ -143,12 +142,6 @@ if __name__ == '__main__':
         logger.error(f"Database path does not exist: {DATABASE_PATH}")
         print(f"Error: Database path does not exist: {DATABASE_PATH}")
         sys.exit(1)
-    
-    # # Start ngrok
-    # public_url = ngrok.connect(5000)
-    # print(f"\n* Public URL: {public_url}")
-    # print("* Share this URL with anyone to let them access your app!")
-    # print("* Press CTRL+C to quit\n")
         
     # Run app with host='0.0.0.0' to allow external access
     app.run(host='0.0.0.0', port=5000, debug=False)
