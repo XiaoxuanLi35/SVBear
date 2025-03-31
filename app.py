@@ -21,8 +21,8 @@ sys.path.append(scikit_image_dir)
 app = Flask(__name__)
 
 # Configuration
-UPLOAD_FOLDER = os.path.join(current_dir, 'static', 'uploads')
-DATABASE_PATH = r"D:\web_app\database"
+UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", os.path.join(current_dir, 'static', 'uploads'))
+DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join(current_dir, 'database'))
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 
 # Create directories
