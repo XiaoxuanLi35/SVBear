@@ -1,0 +1,159 @@
+.result-image {
+    width: 100%;
+    height: 200px;
+    object-fit: contain;
+    margin: 10px 0;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 5px;
+    background-color: #f8f9fa;
+}
+
+.upload-area {
+    border: 2px dashed #ddd;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    margin: 20px 0;
+    cursor: pointer;
+    background-color: #f8f9fa;
+    transition: all 0.3s ease;
+}
+
+.upload-area:hover {
+    border-color: #0d6efd;
+    background-color: #e9ecef;
+}
+
+.image-container {
+    max-width: 100%;
+    margin: 20px auto;
+    position: relative;
+}
+
+#preview-image {
+    max-width: 100%;
+    display: block;
+}
+
+.cropper-container {
+    width: 100%;
+    height: 400px;
+}
+
+.crop-controls {
+    margin: 20px 0;
+    text-align: center;
+}
+
+.loading {
+    display: none;
+    margin: 20px 0;
+}
+
+.card {
+    transition: transform 0.3s ease;
+    height: 100%;
+}
+
+.card-body {
+    padding: 0.5rem;
+}
+
+.card-title {
+    font-size: 0.9rem;
+    margin-bottom: 0.25rem;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.similarity-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background-color: rgba(13, 110, 253, 0.9);
+    color: white;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 0.9em;
+}
+
+
+.main-container {
+    display: flex;
+    flex-direction: column;
+    max-height: 100vh;
+    padding: 10px 0;
+}
+
+.results-section {
+    margin-top: 10px;
+    overflow-y: auto;
+    max-height: calc(100vh - 450px);
+}
+
+h1.page-title {
+    font-size: 1.5rem;
+    margin-bottom: 15px;
+}
+
+/* Responsive styles */
+@media (max-width: 768px) {
+    .container {
+        padding: 15px;
+    }
+    
+    .image-container {
+        max-width: 100%;
+        margin: 15px auto;
+    }
+    
+    #preview-image {
+        max-height: 300px;
+        width: auto;
+    }
+    
+    .crop-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        align-items: center;
+    }
+    
+    .crop-controls .btn {
+        width: 100%;
+        max-width: 200px;
+    }
+    
+    .card-img-top {
+        height: 150px;
+    }
+}
+
+/* General improvements */
+.image-container img {
+    max-height: 400px;
+    width: auto;
+    margin: 0 auto;
+}
+
+.card {
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.upload-area {
+    transition: all 0.3s ease;
+}
+
+.btn {
+    transition: all 0.2s ease;
+}
+
+.btn:active {
+    transform: scale(0.98);
+}
