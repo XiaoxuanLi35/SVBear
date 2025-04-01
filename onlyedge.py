@@ -342,7 +342,7 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
         matches = []
         for i in top_indices:
             full_path = valid_files[i + 1]
-            filename = os.path.basename(full_path)
+            filename = os.path.basename(full_path).replace("'","").replace('"',"")
             matches.append((filename, distances[i]))
 
         return matches
@@ -378,7 +378,7 @@ def display_results(query_image_path, matches, database_path):
         query_img = cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB)
 
     # Resize query image to 48x48 for display
-    query_img = cv2.resize(query_img, (48, 48), interpolation=cv2.INTER_AREA)
+    # query_img = cv2.resize(query_img, (48, 48), interpolation=cv2.INTER_AREA)
 
     # Calculate the number of rows and columns needed
     n_matches = min(len(matches), 10)  # Display max 10 matches
@@ -406,10 +406,11 @@ def display_results(query_image_path, matches, database_path):
     # Display matching results
     for i, (name, dist) in enumerate(matches[:10], start=1):
         if bucket_name:
+            clean_name = name.replace("'","").replace('"',"")
             # download from GCS
             storage_client = get_storage_client()
             bucket = storage_client.bucket(bucket_name)
-            blob_path = f"{gcs_prefix}{name}"
+            blob_path = f"{gcs_prefix}{clean_name}"
             blob = bucket.blob(blob_path)
 
             # download information of the image

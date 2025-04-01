@@ -64,6 +64,7 @@ def serve_static(filename):
 def serve_image(filename):
     try:
         logger.debug(f"Serving image request: {filename}")
+        clean_filename = filename.replace("'", "").replace('"', "")
 
         # Get GCS configuration
         bucket_name = os.getenv('GCS_BUCKET_NAME')
@@ -77,12 +78,12 @@ def serve_image(filename):
             bucket = storage_client.bucket(bucket_name)
 
             # Prepare temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as temp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(clean_filename)[1]) as temp:
                 temp_path = temp.name
 
             # Try downloading file
             try:
-                blob = bucket.blob(filename)
+                blob = bucket.blob(clean_filename)
                 blob.download_to_filename(temp_path)
 
                 @after_this_request
@@ -101,10 +102,10 @@ def serve_image(filename):
                 raise
         else:
             # Handle local file
-            if os.path.isabs(filename):
+            if os.path.isabs(clean_filename):
                 filepath = filename
             else:
-                filepath = os.path.join(current_dir, filename)
+                filepath = os.path.join(current_dir, clean_filename)
 
             if not os.path.exists(filepath):
                 logger.error(f"Image not found: {filepath}")
