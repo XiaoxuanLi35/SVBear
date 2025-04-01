@@ -246,7 +246,7 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
     """
     Find matches using edge features for pixel art from Google Cloud Storage
     """
-    database_prefix = database_prefix.strip('"')
+    database_prefix = database_prefix.replace("'", "").replace('"', "")
     logger.debug(f"Find match in GCS: {bucket_name}/{database_prefix}")
 
     try:
