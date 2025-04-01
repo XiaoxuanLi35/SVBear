@@ -378,7 +378,7 @@ def display_results(query_image_path, matches, database_path):
         query_img = cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB)
 
     # Resize query image to 48x48 for display
-    # query_img = cv2.resize(query_img, (48, 48), interpolation=cv2.INTER_AREA)
+        query_img = cv2.resize(query_img, (48, 48), interpolation=cv2.INTER_AREA)
 
     # Calculate the number of rows and columns needed
     n_matches = min(len(matches), 10)  # Display max 10 matches
