@@ -270,35 +270,46 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
             if name.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                 valid_blobs.append(blob)
 
-        if not valid_blobs:
-            raise ValueError(f"Did not find objects from gs://{bucket_name}/{database_prefix} ")
-
-        logger.debug(f"Found {len(valid_blobs)} valid images")
-
-        # Extract features from all images first
-        all_features = []
-        valid_files = []
+        MAX_IMAGES = 50
+        if len(valid_blobs) > MAX_IMAGES:
+            logger.debug(f"Limiting to processing {MAX_IMAGES} images out of {len(valid_blobs)}")
+            valid_blobs = valid_blobs[:MAX_IMAGES]
 
         try:
             query_features = extract_features(query_image_path)
-            all_features.append(query_features)
-            valid_files.append(query_image_path)
         except Exception as e:
-            logger.error(f"Error when handle query image: {e}")
+            logger.error(f"Error when handle query images: {e}")
             return []
+
+        batch_size = 10
+        all_features = [query_features]
+        valid_files = [query_image_path]
 
         temp_dir = tempfile.mkdtemp()
         try:
-            for blob in valid_blobs:
-                try:
-                    image_data = blob.download_as_bytes()
+            for i in range(0, len(valid_blobs), batch_size):
+                batch = valid_blobs[i:i + batch_size]
+                logger.debug(
+                    f"Processing batch {i // batch_size + 1}/{(len(valid_blobs) + batch_size - 1) // batch_size}")
 
-                    features = extract_features_from_data(image_data)
-                    all_features.append(features)
-                    valid_files.append(blob.name)
-                except Exception as e:
-                    logger.error(f"Error when handle {blob.name} : {e}")
-                    continue
+                batch_features = []
+                batch_files = []
+
+                for blob in batch:
+                    try:
+                        image_data = blob.download_as_bytes()
+                        features = extract_features_from_data(image_data)
+                        batch_features.append(features)
+                        batch_files.append(blob.name)
+                    except Exception as e:
+                        logger.error(f"Error processing {blob.name}: {e}")
+                        continue
+
+                all_features.extend(batch_features)
+                valid_files.extend(batch_files)
+
+                import gc
+                gc.collect()
         finally:
             try:
                 os.rmdir(temp_dir)
@@ -318,7 +329,6 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
         pca = PCA(n_components=n_components)
         features_pca = pca.fit_transform(all_features)
 
-        # 打印PCA信息
         logger.debug(f"original features vector: {all_features.shape[1]}")
         logger.debug(f"after PCA: {n_components}")
         logger.debug(f"Explain variance ratio: {sum(pca.explained_variance_ratio_):.4f}")
