@@ -399,7 +399,7 @@ def display_results(query_image_path, matches, database_path):
 
     # 检查是否使用GCS
     bucket_name = os.getenv('GCS_BUCKET_NAME')
-    gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
+    gcs_prefix = os.getenv('GCS_DATABASE_PREFIX')
 
     # Display matching results
     for i, (name, dist) in enumerate(matches[:10], start=1):
