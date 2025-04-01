@@ -253,6 +253,12 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
         storage_client = get_storage_client()
         bucket = storage_client.bucket(bucket_name)
 
+        logger.debug(f"Listing all objects in bucket (regardless of prefix)...")
+        all_blobs = list(bucket.list_blobs())
+        logger.debug(f"Total objects in bucket: {len(all_blobs)}")
+        if len(all_blobs) > 0:
+            logger.debug(f"First few objects: {[b.name for b in all_blobs[:5]]}")
+
         blobs = list(bucket.list_blobs(prefix=database_prefix))
         logger.debug(f"Found {len(blobs)} objects from database")
 
