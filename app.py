@@ -90,7 +90,7 @@ def upload_file():
                 # Import onlyedge module
                 logger.debug(f"Python path: {sys.path}")
                 logger.debug(f"Current directory: {os.getcwd()}")
-                from Object_Recognition.onlyedge import find_top_matches
+                from onlyedge import find_top_matches
                 
                 # Find matches
                 logger.debug("Finding matches...")
