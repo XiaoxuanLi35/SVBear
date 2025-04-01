@@ -64,9 +64,7 @@ def serve_static(filename):
 def serve_image(filename):
     try:
         logger.debug(f"Serving image request: {filename}")
-        clean_filename = filename.replace('"', "")
-        if clean_filename.startwith("''"):
-            clean_filename = clean_filename[2:]
+        clean_filename = filename.replace("'", "").replace('"', "")
 
         # Get GCS configuration
         bucket_name = os.getenv('GCS_BUCKET_NAME')

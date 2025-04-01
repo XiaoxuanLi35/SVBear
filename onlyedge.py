@@ -342,7 +342,7 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
         matches = []
         for i in top_indices:
             full_path = valid_files[i + 1]
-            filename = os.path.basename(full_path)
+            filename = os.path.basename(full_path).replace("'", "").replace('"', "")
             matches.append((filename, distances[i]))
 
         return matches
