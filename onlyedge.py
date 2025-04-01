@@ -9,21 +9,21 @@ import os
 import logging
 from google.cloud import storage
 
-# 配置日志
+# Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
-# 初始化GCS客户端
+# Initialize GCS client
 def get_storage_client():
-    """获取已配置的Storage客户端"""
-    # 处理Render环境中的认证
+    """Get the configured Storage client"""
+    # Handle credentials in Render environment
     if 'GOOGLE_CREDENTIALS_JSON' in os.environ:
-        # 创建临时文件存储凭据
+        # Create a temporary file for credentials
         fd, temp_credentials_path = tempfile.mkstemp(suffix='.json')
         with os.fdopen(fd, 'w') as f:
             f.write(os.environ['GOOGLE_CREDENTIALS_JSON'])
-        # 设置环境变量
+        # Set environment variable
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_credentials_path
 
     return storage.Client()
@@ -165,15 +165,14 @@ def find_top_matches(query_image_path, database_path, top_n=10):
     """
     Find matches using edge features for pixel art
     """
-    # 检查是否使用GCS
+    # Check if it uses gcs
     bucket_name = os.getenv('GCS_BUCKET_NAME')
     gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
     if bucket_name:
-        logger.debug(f"使用GCS存储桶: {bucket_name}/{gcs_prefix}")
+        logger.debug(f"Uses GCS Bucket: {bucket_name}/{gcs_prefix}")
         return find_top_matches_gcs(query_image_path, bucket_name, gcs_prefix, top_n)
 
-    # 原有的本地文件系统匹配逻辑
     # Get all images in the database
     extensions = ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif"]
     image_files = []
@@ -247,18 +246,15 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
     """
     Find matches using edge features for pixel art from Google Cloud Storage
     """
-    logger.debug(f"在GCS中查找匹配项: {bucket_name}/{database_prefix}")
+    logger.debug(f"Find match in GCS: {bucket_name}/{database_prefix}")
 
-    # 初始化GCS客户端
     try:
         storage_client = get_storage_client()
         bucket = storage_client.bucket(bucket_name)
 
-        # 列出数据库中的所有图像
         blobs = list(bucket.list_blobs(prefix=database_prefix))
-        logger.debug(f"在数据库中找到 {len(blobs)} 个对象")
+        logger.debug(f"Found {len(blobs)} objects from database")
 
-        # 过滤只保留图像文件
         valid_blobs = []
         for blob in blobs:
             name = blob.name.lower()
@@ -266,78 +262,66 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
                 valid_blobs.append(blob)
 
         if not valid_blobs:
-            raise ValueError(f"没有在 gs://{bucket_name}/{database_prefix} 中找到图像文件")
+            raise ValueError(f"Did not find objects from gs://{bucket_name}/{database_prefix} ")
 
-        logger.debug(f"找到 {len(valid_blobs)} 个有效图像文件")
+        logger.debug(f"Found {len(valid_blobs)} valid images")
 
         # Extract features from all images first
         all_features = []
         valid_files = []
 
         try:
-            # 处理查询图像
             query_features = extract_features(query_image_path)
             all_features.append(query_features)
             valid_files.append(query_image_path)
         except Exception as e:
-            logger.error(f"处理查询图像时出错: {e}")
+            logger.error(f"Error when handle query image: {e}")
             return []
 
-        # 处理数据库图像
         temp_dir = tempfile.mkdtemp()
         try:
             for blob in valid_blobs:
                 try:
-                    # 下载图像数据
                     image_data = blob.download_as_bytes()
 
-                    # 提取特征
                     features = extract_features_from_data(image_data)
                     all_features.append(features)
                     valid_files.append(blob.name)
                 except Exception as e:
-                    logger.error(f"处理 {blob.name} 时出错: {e}")
+                    logger.error(f"Error when handle {blob.name} : {e}")
                     continue
         finally:
-            # 清理临时目录
             try:
                 os.rmdir(temp_dir)
             except:
                 pass
 
         if len(all_features) < 2:
-            raise ValueError("没有足够的特征被成功提取")
+            raise ValueError("Not enough features are extracted")
 
-        # 转换为numpy数组
         all_features = np.array(all_features)
 
-        # 应用PCA (0.90 方差比)
         pca = PCA()
         pca.fit(all_features)
         cumsum = np.cumsum(pca.explained_variance_ratio_)
-        n_components = np.argmax(cumsum >= 0.90) + 1  # 动态组件选择
+        n_components = np.argmax(cumsum >= 0.90) + 1
 
-        # 使用选定的组件转换特征
         pca = PCA(n_components=n_components)
         features_pca = pca.fit_transform(all_features)
 
         # 打印PCA信息
-        logger.debug(f"原始特征维度: {all_features.shape[1]}")
-        logger.debug(f"降维后特征维度: {n_components}")
-        logger.debug(f"解释方差比: {sum(pca.explained_variance_ratio_):.4f}")
+        logger.debug(f"original features vector: {all_features.shape[1]}")
+        logger.debug(f"after PCA: {n_components}")
+        logger.debug(f"Explain variance ratio: {sum(pca.explained_variance_ratio_):.4f}")
 
-        # 获取查询和数据库特征
         query_features_pca = features_pca[0]
         database_features_pca = features_pca[1:]
 
-        # 计算距离并找出最佳匹配
         distances = [euclidean(query_features_pca, feat) for feat in database_features_pca]
         top_indices = np.argsort(distances)[:top_n]
 
-        # 返回带有文件路径和距离的最佳匹配
         matches = []
         for i in top_indices:
-            # 从完整路径中提取文件名
             full_path = valid_files[i + 1]
             filename = os.path.basename(full_path)
             matches.append((filename, distances[i]))
@@ -345,7 +329,7 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
         return matches
 
     except Exception as e:
-        logger.error(f"查找匹配时出错: {str(e)}")
+        logger.error(f"Error when find matches: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return []
@@ -397,20 +381,19 @@ def display_results(query_image_path, matches, database_path):
     distances = [dist for _, dist in matches]
     max_dist = max(distances) if distances else 1
 
-    # 检查是否使用GCS
     bucket_name = os.getenv('GCS_BUCKET_NAME')
     gcs_prefix = os.getenv('GCS_DATABASE_PREFIX')
 
     # Display matching results
     for i, (name, dist) in enumerate(matches[:10], start=1):
         if bucket_name:
-            # 从GCS下载图像
+            # download from GCS
             storage_client = get_storage_client()
             bucket = storage_client.bucket(bucket_name)
             blob_path = f"{gcs_prefix}{name}"
             blob = bucket.blob(blob_path)
 
-            # 下载图像数据
+            # download information of the image
             try:
                 image_data = blob.download_as_bytes()
                 img = cv2.imdecode(np.frombuffer(image_data, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
@@ -418,7 +401,6 @@ def display_results(query_image_path, matches, database_path):
                 print(f"Error downloading {name}: {e}")
                 continue
         else:
-            # 本地文件系统
             img_path = Path(database_path) / name
             img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
 
@@ -458,20 +440,19 @@ def display_results(query_image_path, matches, database_path):
 
 
 if __name__ == "__main__":
-    # 默认路径
+    # default paths
     default_database = r"C:\Users\李晓璇\Desktop\Semester 4\CS6123\project_3\spriters\Mixed"
     default_query = r"C:\Users\李晓璇\Desktop\Semester 4\CS6123\project_3\scikit-image\test_dataset\test2.jpg"
 
-    # 获取环境变量
+    # environment variables
     bucket_name = os.getenv('GCS_BUCKET_NAME')
     gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
     if bucket_name:
-        print(f"\n使用Google Cloud Storage: gs://{bucket_name}/{gcs_prefix}")
+        print(f"\nUse Google Cloud Storage: gs://{bucket_name}/{gcs_prefix}")
     else:
-        print(f"\n使用本地文件系统: {default_database}")
+        print(f"\nUse local directory: {default_database}")
 
-    # 获取命令行参数或使用默认值
     database_path = Path(default_database)
     query_image = default_query
 

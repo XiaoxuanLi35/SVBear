@@ -10,7 +10,7 @@ import traceback
 import tempfile
 from google.cloud import storage
 
-# 确保目录存在
+# Ensure directory exists
 os.makedirs('/tmp/database', exist_ok=True)
 
 # Configure logging
@@ -22,7 +22,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 scikit_image_dir = os.path.join(parent_dir, 'scikit-image')
 sys.path.append(scikit_image_dir)
-sys.path.append(current_dir)  # 添加当前目录到Python路径
+sys.path.append(current_dir)  # Add current directory to Python path
 
 app = Flask(__name__)
 
@@ -65,27 +65,26 @@ def serve_image(filename):
     try:
         logger.debug(f"Serving image request: {filename}")
 
-        # 获取GCS配置
+        # Get GCS configuration
         bucket_name = os.getenv('GCS_BUCKET_NAME')
         gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
-        # 检查是否是GCS路径
+        # Check if it is a GCS path
         if bucket_name and (filename.startswith(gcs_prefix) or
                             not os.path.exists(os.path.join(current_dir, filename))):
-            # 初始化GCS客户端
+            # Initialize GCS client
             storage_client = storage.Client()
             bucket = storage_client.bucket(bucket_name)
 
-            # 准备临时文件
+            # Prepare temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as temp:
                 temp_path = temp.name
 
-            # 尝试下载文件
+            # Try downloading file
             try:
                 blob = bucket.blob(filename)
                 blob.download_to_filename(temp_path)
 
-                # 发送文件并在请求结束后删除
                 @after_this_request
                 def remove_file(response):
                     try:
@@ -101,7 +100,7 @@ def serve_image(filename):
                     os.remove(temp_path)
                 raise
         else:
-            # 本地文件处理（保留原有逻辑）
+            # Handle local file
             if os.path.isabs(filename):
                 filepath = filename
             else:
@@ -133,58 +132,51 @@ def upload_file():
 
         if file and allowed_file(file.filename):
             try:
-                # 保存上传的文件
+                # Save uploaded file
                 filename = os.path.join(UPLOAD_FOLDER, file.filename)
                 logger.debug(f"Saving file to: {filename}")
                 file.save(filename)
 
-                # 导入onlyedge模块
+                # Import onlyedge module
                 logger.debug(f"Python path: {sys.path}")
                 logger.debug(f"Current directory: {os.getcwd()}")
 
                 try:
-                    # 首先尝试原始导入
+                    # Attempt original import
                     from Object_Recognition.onlyedge import find_top_matches
-                    logger.debug("成功导入原始Object_Recognition.onlyedge模块")
+                    logger.debug("Successfully imported Object_Recognition.onlyedge module")
                 except ImportError:
-                    # 如果失败，尝试从同一目录导入
+                    # Attempt local import
                     try:
                         from onlyedge import find_top_matches
-                        logger.debug("成功从本地目录导入onlyedge模块")
+                        logger.debug("Successfully imported onlyedge from local directory")
                     except ImportError as e:
-                        logger.error(f"无法导入find_top_matches函数: {str(e)}")
+                        logger.error(f"Failed to import find_top_matches: {str(e)}")
                         return jsonify({'error': 'Module import error'}), 500
 
-                # 查找匹配
+                # Find matches
                 logger.debug("Finding matches...")
                 matches = find_top_matches(filename, DATABASE_PATH)
                 logger.debug(f"Found {len(matches)} matches")
 
-                # 准备结果
                 results = []
 
-                # 获取GCS配置
                 bucket_name = os.getenv('GCS_BUCKET_NAME')
                 gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
                 for match_name, distance in matches:
                     if bucket_name:
-                        # 使用GCS路径
                         gcs_match_path = f"{gcs_prefix}{match_name}"
                         image_path = f'/image/{gcs_match_path}'
                     else:
-                        # 使用本地路径
                         match_path = os.path.join(DATABASE_PATH, match_name)
                         if os.path.exists(match_path):
                             url_path = match_path.replace('\\', '/')
                             image_path = f'/image/{url_path}'
                         else:
-                            # 如果文件不存在，跳过
                             continue
 
-                    # 转换距离为相似度分数
                     similarity = 1 - distance
-                    # 移除文件扩展名以用于显示
                     display_name = os.path.splitext(match_name)[0]
 
                     results.append({
@@ -193,7 +185,6 @@ def upload_file():
                         'image_path': image_path
                     })
 
-                # 获取上传文件的URL
                 uploaded_url = filename.replace('\\', '/')
 
                 return jsonify({
@@ -214,11 +205,9 @@ def upload_file():
 
 
 if __name__ == '__main__':
-    # 验证配置
     logger.info(f"Upload folder: {UPLOAD_FOLDER}")
     logger.info(f"Database path: {DATABASE_PATH}")
 
-    # 检查GCS配置
     bucket_name = os.getenv('GCS_BUCKET_NAME')
     if bucket_name:
         logger.info(f"Using GCS bucket: {bucket_name}")
@@ -228,5 +217,4 @@ if __name__ == '__main__':
     else:
         logger.warning("GCS_BUCKET_NAME not set, using local filesystem only")
 
-    # 运行应用，设置host='0.0.0.0'以允许外部访问
     app.run(host='0.0.0.0', port=5000, debug=False)
