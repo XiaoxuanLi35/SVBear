@@ -3,6 +3,8 @@ import numpy as np
 from pathlib import Path
 from sklearn.decomposition import PCA
 from scipy.spatial.distance import euclidean
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import tempfile
 import os

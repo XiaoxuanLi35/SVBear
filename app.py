@@ -143,7 +143,7 @@ def upload_file():
 
                 try:
                     # Attempt original import
-                    from Object_Recognition.onlyedge import find_top_matches
+                    from onlyedge import find_top_matches
                     logger.debug("Successfully imported Object_Recognition.onlyedge module")
                 except ImportError:
                     # Attempt local import
