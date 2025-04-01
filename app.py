@@ -211,4 +211,19 @@ def upload_file():
 
 
 if __name__ == '__main__':
-# 验证配置
+    # 验证配置
+    logger.info(f"Upload folder: {UPLOAD_FOLDER}")
+    logger.info(f"Database path: {DATABASE_PATH}")
+
+    # 检查GCS配置
+    bucket_name = os.getenv('GCS_BUCKET_NAME')
+    if bucket_name:
+        logger.info(f"Using GCS bucket: {bucket_name}")
+        gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
+        if gcs_prefix:
+            logger.info(f"GCS prefix: {gcs_prefix}")
+    else:
+        logger.warning("GCS_BUCKET_NAME not set, using local filesystem only")
+
+    # 运行应用，设置host='0.0.0.0'以允许外部访问
+    app.run(host='0.0.0.0', port=5000, debug=False)
