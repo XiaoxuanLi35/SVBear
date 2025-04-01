@@ -10,6 +10,9 @@ import traceback
 import tempfile
 from google.cloud import storage
 
+# 确保目录存在
+os.makedirs('/tmp/database', exist_ok=True)
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
