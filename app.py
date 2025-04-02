@@ -9,6 +9,8 @@ import sys
 import traceback
 import tempfile
 from google.cloud import storage
+import threading
+import pickle
 
 # Ensure directory exists
 os.makedirs('/tmp/database', exist_ok=True)
@@ -31,10 +33,17 @@ UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", os.path.join('/tmp', 'uploads'))
 DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join('/tmp', 'database'))
 LOCAL_TEMP_DIR = os.getenv("LOCAL_TEMP_DIR", os.path.join('/tmp', 'temp_files'))
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+FEATURES_CACHE_FILE = os.path.join('/tmp', "gcs_features_cache.npz")
+FILENAMES_CACHE_FILE = os.path.join('/tmp', "gcs_filenames_cache.pkl")
+PCA_MODEL_CACHE_FILE = os.path.join('/tmp', "pca_model_cache.pkl")
 
 # Create directories
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
+
+# Global variable to track if preloading has started
+preloading_started = False
+preloading_complete = False
 
 
 def allowed_file(filename):
@@ -50,8 +59,44 @@ def get_relative_path(absolute_path):
         return absolute_path.replace('\\', '/')
 
 
+# Function to preload features in background thread
+def preload_features():
+    global preloading_complete
+
+    try:
+        bucket_name = os.getenv('GCS_BUCKET_NAME')
+        gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
+
+        if bucket_name:
+            logger.info("Starting background preloading of features...")
+
+            # Import here to avoid circular imports
+            from onlyedge import extract_all_gcs_features
+
+            # Extract features with force_refresh=False to use cache if available
+            extract_all_gcs_features(bucket_name, gcs_prefix, force_refresh=False)
+
+            logger.info("Background preloading of features complete.")
+            preloading_complete = True
+        else:
+            logger.warning("No GCS bucket configured, skipping preloading.")
+            preloading_complete = True
+    except Exception as e:
+        logger.error(f"Error in preload_features: {str(e)}\n{traceback.format_exc()}")
+        preloading_complete = True
+
+
 @app.route('/')
 def index():
+    global preloading_started
+
+    # Start preloading features in background if not already started
+    if not preloading_started:
+        preloading_thread = threading.Thread(target=preload_features)
+        preloading_thread.daemon = True
+        preloading_thread.start()
+        preloading_started = True
+
     return render_template('index.html')
 
 
@@ -119,6 +164,51 @@ def serve_image(filename):
         return str(e), 404
 
 
+def find_matches_with_cached_features(query_features, top_n=10):
+    """
+    Find matches using pre-extracted features from cache
+    """
+    try:
+        # Load features from cache
+        logger.debug("Loading features from cache")
+        features = np.load(FEATURES_CACHE_FILE)['features']
+
+        with open(FILENAMES_CACHE_FILE, 'rb') as f:
+            filenames = pickle.load(f)
+
+        if os.path.exists(PCA_MODEL_CACHE_FILE):
+            with open(PCA_MODEL_CACHE_FILE, 'rb') as f:
+                pca_model = pickle.load(f)
+
+                # Apply PCA transformation
+                query_features_pca = pca_model.transform([query_features])[0]
+                features_pca = pca_model.transform(features)
+        else:
+            # No PCA model, use raw features
+            query_features_pca = query_features
+            features_pca = features
+
+        # Calculate distances quickly using numpy operations
+        from scipy.spatial.distance import cdist
+        distances = cdist([query_features_pca], features_pca, 'euclidean')[0]
+
+        # Find top matches
+        top_indices = np.argsort(distances)[:top_n]
+
+        # Return top matches
+        matches = []
+        for i in top_indices:
+            full_path = filenames[i]
+            filename = os.path.basename(full_path).replace("'", "").replace('"', "")
+            matches.append((filename, distances[i]))
+
+        return matches
+
+    except Exception as e:
+        logger.error(f"Error finding matches with cached features: {str(e)}")
+        return []
+
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
@@ -138,22 +228,13 @@ def upload_file():
                 logger.debug(f"Saving file to: {filename}")
                 file.save(filename)
 
-                # Import onlyedge module
-                logger.debug(f"Python path: {sys.path}")
-                logger.debug(f"Current directory: {os.getcwd()}")
-
+                # Import required modules
                 try:
-                    # Attempt original import
-                    from onlyedge import find_top_matches
-                    logger.debug("Successfully imported Object_Recognition.onlyedge module")
-                except ImportError:
-                    # Attempt local import
-                    try:
-                        from onlyedge import find_top_matches
-                        logger.debug("Successfully imported onlyedge from local directory")
-                    except ImportError as e:
-                        logger.error(f"Failed to import find_top_matches: {str(e)}")
-                        return jsonify({'error': 'Module import error'}), 500
+                    from onlyedge import extract_features_from_data, find_top_matches
+                    logger.debug("Successfully imported onlyedge module")
+                except ImportError as e:
+                    logger.error(f"Failed to import modules: {str(e)}")
+                    return jsonify({'error': 'Module import error'}), 500
 
                 # Get GCS configuration
                 bucket_name = os.getenv('GCS_BUCKET_NAME')
@@ -163,14 +244,23 @@ def upload_file():
                 with open(filename, 'rb') as f:
                     image_data = f.read()
 
-                # Find matches
-                logger.debug("Finding matches...")
-                if bucket_name:
-                    matches = find_top_matches(image_data, bucket_name, gcs_prefix)
+                # Check if features are already preloaded/cached
+                if (preloading_complete or
+                        (os.path.exists(FEATURES_CACHE_FILE) and
+                         os.path.exists(FILENAMES_CACHE_FILE))):
+
+                    # Extract features from query image
+                    query_features = extract_features_from_data(image_data)
+
+                    # Find matches using cached features
+                    matches = find_matches_with_cached_features(query_features)
+                    logger.debug(f"Found {len(matches)} matches using cached features")
                 else:
-                    logger.warning("GCS_BUCKET_NAME not set - using local database may not work with current implementation")
-                    matches = []
-                logger.debug(f"Found {len(matches)} matches")
+                    # Use original function if cache not available
+                    logger.debug("Cache not available, using original function")
+                    # Set a low timeout to avoid worker timeout
+                    matches = find_top_matches(image_data, bucket_name, gcs_prefix, top_n=5)
+                    logger.debug(f"Found {len(matches)} matches")
 
                 results = []
 
