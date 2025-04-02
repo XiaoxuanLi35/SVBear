@@ -155,15 +155,24 @@ def upload_file():
                         logger.error(f"Failed to import find_top_matches: {str(e)}")
                         return jsonify({'error': 'Module import error'}), 500
 
+                # Get GCS configuration
+                bucket_name = os.getenv('GCS_BUCKET_NAME')
+                gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
+
+                # Read the file
+                with open(filename, 'rb') as f:
+                    image_data = f.read()
+
                 # Find matches
                 logger.debug("Finding matches...")
-                matches = find_top_matches(filename, DATABASE_PATH)
+                if bucket_name:
+                    matches = find_top_matches(image_data, bucket_name, gcs_prefix)
+                else:
+                    logger.warning("GCS_BUCKET_NAME not set - using local database may not work with current implementation")
+                    matches = []
                 logger.debug(f"Found {len(matches)} matches")
 
                 results = []
-
-                bucket_name = os.getenv('GCS_BUCKET_NAME')
-                gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
                 for match_name, distance in matches:
                     if bucket_name:
