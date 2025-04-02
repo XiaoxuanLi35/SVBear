@@ -70,7 +70,7 @@ def extract_features_from_data(image_data):
     try:
         # Convert image data to numpy array
         nparr = np.frombuffer(image_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
             logger.error("Failed to decode image")
@@ -83,32 +83,85 @@ def extract_features_from_data(image_data):
         return None
 
 
-def calculate_image_features(image, num_blocks=4, num_bins=16):
+def calculate_image_features(image):
     """
-    Calculate image features: edge density and gradients
+    使用与onlyedge.py一致的特征提取方法
     """
-    # Calculate edge density
-    height, width = image.shape
-    block_height, block_width = height // num_blocks, width // num_blocks
-    densities = []
-    for i in range(num_blocks):
-        for j in range(num_blocks):
-            block = image[i * block_height:(i + 1) * block_height, j * block_width:(j + 1) * block_width]
-            edges = cv2.Canny(block, 100, 200)
-            density = np.sum(edges) / (block_height * block_width)
-            densities.append(density)
+    # 确保输入图像是RGB格式
+    if len(image.shape) == 2:  # 如果是灰度图，转换为RGB
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
 
-    # Calculate gradients
-    grad_x = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
-    magnitude, angle = cv2.cartToPolar(grad_x, grad_y, angleInDegrees=True)
+    # 转换为灰度图
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    grad_x_hist, _ = np.histogram(grad_x, bins=num_bins, range=(-255, 255))
-    grad_y_hist, _ = np.histogram(grad_y, bins=num_bins, range=(-255, 255))
-    orientation_hist, _ = np.histogram(angle, bins=num_bins, range=(0, 360))
+    # 边缘检测参数
+    ksize = 3
+    threshold1 = 100
+    threshold2 = 200
+    direction_bins = 18
 
-    # Combine all features into a single array
-    return np.concatenate([grad_x_hist, grad_y_hist, orientation_hist, np.array(densities)])
+    # 应用高斯模糊减少噪声
+    blurred = cv2.GaussianBlur(gray, (ksize, ksize), 0)
+
+    # Canny边缘检测
+    edges = cv2.Canny(blurred, threshold1, threshold2)
+
+    # 计算Sobel梯度
+    sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=ksize)
+    sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=ksize)
+
+    # 计算梯度方向和幅度
+    gradient_direction = np.arctan2(sobely, sobelx) * 180 / np.pi  # 范围: [-180, 180]
+    gradient_magnitude = np.sqrt(sobelx ** 2 + sobely ** 2)
+
+    # 创建非旋转不变梯度直方图
+    direction_range = [-180, 180]
+    direction_step = 360 / direction_bins
+    direction_hist = np.zeros(direction_bins)
+
+    for i in range(direction_bins):
+        lower = direction_range[0] + i * direction_step
+        upper = lower + direction_step
+        mask = (gradient_direction >= lower) & (gradient_direction < upper)
+        direction_hist[i] = np.sum(gradient_magnitude[mask])
+
+    # 归一化方向直方图
+    direction_hist = direction_hist / (np.sum(direction_hist) + 1e-6)
+
+    # 计算X和Y梯度特征
+    x_gradient_hist = np.histogram(sobelx.flatten(), bins=direction_bins // 2, range=[-1, 1])[0]
+    y_gradient_hist = np.histogram(sobely.flatten(), bins=direction_bins // 2, range=[-1, 1])[0]
+
+    # 归一化X和Y梯度直方图
+    x_gradient_hist = x_gradient_hist / (np.sum(x_gradient_hist) + 1e-6)
+    y_gradient_hist = y_gradient_hist / (np.sum(y_gradient_hist) + 1e-6)
+
+    # 计算边缘密度
+    block_size = 8
+    h, w = edges.shape
+    blocks_h = h // block_size
+    blocks_w = w // block_size
+    density_map = np.zeros((blocks_h, blocks_w))
+
+    for i in range(blocks_h):
+        for j in range(blocks_w):
+            block = edges[i * block_size:(i + 1) * block_size, j * block_size:(j + 1) * block_size]
+            density_map[i, j] = np.sum(block > 0) / (block_size * block_size)
+
+    edge_density = density_map.flatten()
+
+    # 合并所有边缘特征
+    features = np.concatenate([
+        direction_hist,  # 非旋转不变梯度方向
+        x_gradient_hist,  # X梯度分布
+        y_gradient_hist,  # Y梯度分布
+        edge_density  # 边缘密度特征
+    ])
+
+    # 归一化特征向量
+    features = features / (np.linalg.norm(features) + 1e-10)
+
+    return features
 
 
 # Function to preload features in background thread
