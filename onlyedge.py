@@ -4,16 +4,24 @@ from pathlib import Path
 from sklearn.decomposition import PCA
 from scipy.spatial.distance import euclidean
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import tempfile
 import os
 import logging
 from google.cloud import storage
+import pickle
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Paths for cached features
+FEATURES_CACHE_FILE = "gcs_features_cache.npz"
+FILENAMES_CACHE_FILE = "gcs_filenames_cache.pkl"
+PCA_MODEL_CACHE_FILE = "pca_model_cache.pkl"
 
 
 # Initialize GCS client
@@ -104,39 +112,9 @@ def extract_edge_features(image):
     ])
 
 
-def extract_features(image_path):
-    """
-    Extract image features using only edge features
-    """
-    try:
-        # Read image with special handling for Chinese paths
-        image_data = np.fromfile(str(image_path), dtype=np.uint8)
-        image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Failed to read image: {image_path}")
-
-        # Convert BGR to RGB
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # Resize image to 48x48
-        image = cv2.resize(image, (48, 48), interpolation=cv2.INTER_AREA)
-
-        # Extract edge features
-        edge_features = extract_edge_features(image)
-
-        # Normalize feature vector
-        edge_features = edge_features / np.linalg.norm(edge_features)
-
-        return edge_features
-
-    except Exception as e:
-        print(f"Error processing image {image_path}: {str(e)}")
-        raise
-
-
 def extract_features_from_data(image_data):
     """
-    Extract features from image binary data instead of file path
+    Extract features from image binary data
     """
     try:
         # Decode image from binary data
@@ -163,106 +141,42 @@ def extract_features_from_data(image_data):
         raise
 
 
-def find_top_matches(query_image_path, database_path, top_n=10):
+def extract_all_gcs_features(bucket_name, database_prefix, force_refresh=False):
     """
-    Find matches using edge features for pixel art
+    Extract features from all images in the GCS bucket and save them to disk.
+    If force_refresh is False and cached features exist, load from cache instead.
     """
-    # Check if it uses gcs
-    bucket_name = os.getenv('GCS_BUCKET_NAME')
-    gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
-
-    if bucket_name:
-        logger.debug(f"Uses GCS Bucket: {bucket_name}/{gcs_prefix}")
-        return find_top_matches_gcs(query_image_path, bucket_name, gcs_prefix, top_n)
-
-    # Get all images in the database
-    extensions = ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif"]
-    image_files = []
-    for ext in extensions:
-        image_files.extend(list(Path(database_path).glob(ext)))
-
-    if not image_files:
-        raise ValueError(f"No image files found in {database_path}")
-
-    # Extract features from all images first
-    all_features = []
-    valid_files = []
-
-    try:
-        query_features = extract_features(query_image_path)
-        all_features.append(query_features)
-        valid_files.append(query_image_path)
-    except Exception as e:
-        print(f"Error processing query image: {e}")
-        return []
-
-    # Process database images
-    for img_path in image_files:
+    # Check if cached features exist and we don't need to force refresh
+    if not force_refresh and os.path.exists(FEATURES_CACHE_FILE) and os.path.exists(FILENAMES_CACHE_FILE):
+        logger.info(f"Loading features from cache files")
         try:
-            features = extract_features(img_path)
-            all_features.append(features)
-            valid_files.append(img_path)
+            features = np.load(FEATURES_CACHE_FILE)['features']
+            with open(FILENAMES_CACHE_FILE, 'rb') as f:
+                filenames = pickle.load(f)
+
+            # Load PCA model if available
+            if os.path.exists(PCA_MODEL_CACHE_FILE):
+                with open(PCA_MODEL_CACHE_FILE, 'rb') as f:
+                    pca_model = pickle.load(f)
+            else:
+                pca_model = None
+
+            logger.info(f"Loaded {len(features)} features and {len(filenames)} filenames from cache")
+            return features, filenames, pca_model
         except Exception as e:
-            print(f"Error processing {img_path.name}: {e}")
-            continue
+            logger.error(f"Error loading from cache: {e}, will extract features fresh")
 
-    if len(all_features) < 2:
-        raise ValueError("Not enough features extracted successfully")
+    logger.info(f"Extracting features from GCS bucket: {bucket_name}/{database_prefix}")
+    start_time = time.time()
 
-    # Convert to numpy array
-    all_features = np.array(all_features)
-
-    # Apply PCA (0.90 variance ratio)
-    pca = PCA()
-    pca.fit(all_features)
-    cumsum = np.cumsum(pca.explained_variance_ratio_)
-    n_components = np.argmax(cumsum >= 0.90) + 1  # Dynamic component selection
-
-    # Transform features using selected components
-    pca = PCA(n_components=n_components)
-    features_pca = pca.fit_transform(all_features)
-
-    # Print PCA information
-    print("\nPCA Analysis Information:")
-    print(f"Original feature dimensions: {all_features.shape[1]}")
-    print(f"Reduced feature dimensions: {n_components}")
-    print(f"Explained variance ratio: {sum(pca.explained_variance_ratio_):.4f}")
-    print("Explained variance ratio for each principal component:")
-    for i, ratio in enumerate(pca.explained_variance_ratio_):
-        print(f"  PC{i + 1}: {ratio:.4f}")
-
-    # Get query and database features
-    query_features_pca = features_pca[0]
-    database_features_pca = features_pca[1:]
-
-    # Calculate distances and find top matches
-    distances = [euclidean(query_features_pca, feat) for feat in database_features_pca]
-    top_indices = np.argsort(distances)[:top_n]
-
-    # Return top matches with file paths and distances
-    matches = [(valid_files[i + 1].name, distances[i]) for i in top_indices]
-    return matches
-
-
-def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=10):
-    """
-    Find matches using edge features for pixel art from Google Cloud Storage
-    """
     database_prefix = database_prefix.replace("'", "").replace('"', "")
-    logger.debug(f"Find match in GCS: {bucket_name}/{database_prefix}")
 
     try:
         storage_client = get_storage_client()
         bucket = storage_client.bucket(bucket_name)
 
-        logger.debug(f"Listing all objects in bucket (regardless of prefix)...")
-        all_blobs = list(bucket.list_blobs())
-        logger.debug(f"Total objects in bucket: {len(all_blobs)}")
-        if len(all_blobs) > 0:
-            logger.debug(f"First few objects: {[b.name for b in all_blobs[:5]]}")
-
         blobs = list(bucket.list_blobs(prefix=database_prefix))
-        logger.debug(f"Found {len(blobs)} objects from database")
+        logger.info(f"Found {len(blobs)} objects in database")
 
         valid_blobs = []
         for blob in blobs:
@@ -270,96 +184,132 @@ def find_top_matches_gcs(query_image_path, bucket_name, database_prefix, top_n=1
             if name.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                 valid_blobs.append(blob)
 
-        MAX_IMAGES = 50
-        if len(valid_blobs) > MAX_IMAGES:
-            logger.debug(f"Limiting to processing {MAX_IMAGES} images out of {len(valid_blobs)}")
-            valid_blobs = valid_blobs[:MAX_IMAGES]
+        logger.info(f"Found {len(valid_blobs)} valid images in database")
 
-        try:
-            query_features = extract_features(query_image_path)
-        except Exception as e:
-            logger.error(f"Error when handle query images: {e}")
-            return []
-
+        all_features = []
+        all_filenames = []
         batch_size = 10
-        all_features = [query_features]
-        valid_files = [query_image_path]
 
-        temp_dir = tempfile.mkdtemp()
-        try:
-            for i in range(0, len(valid_blobs), batch_size):
-                batch = valid_blobs[i:i + batch_size]
-                logger.debug(
-                    f"Processing batch {i // batch_size + 1}/{(len(valid_blobs) + batch_size - 1) // batch_size}")
+        for i in range(0, len(valid_blobs), batch_size):
+            batch = valid_blobs[i:i + batch_size]
+            logger.info(f"Processing batch {i // batch_size + 1}/{(len(valid_blobs) + batch_size - 1) // batch_size}")
 
-                batch_features = []
-                batch_files = []
+            for blob in batch:
+                try:
+                    image_data = blob.download_as_bytes()
+                    features = extract_features_from_data(image_data)
+                    all_features.append(features)
+                    all_filenames.append(blob.name)
+                    logger.debug(f"Processed {blob.name}")
+                except Exception as e:
+                    logger.error(f"Error processing {blob.name}: {e}")
+                    continue
 
-                for blob in batch:
-                    try:
-                        image_data = blob.download_as_bytes()
-                        features = extract_features_from_data(image_data)
-                        batch_features.append(features)
-                        batch_files.append(blob.name)
-                    except Exception as e:
-                        logger.error(f"Error processing {blob.name}: {e}")
-                        continue
-
-                all_features.extend(batch_features)
-                valid_files.extend(batch_files)
-
+            # Clean up memory periodically
+            if i % (batch_size * 10) == 0 and i > 0:
                 import gc
                 gc.collect()
-        finally:
-            try:
-                os.rmdir(temp_dir)
-            except:
-                pass
 
-        if len(all_features) < 2:
-            raise ValueError("Not enough features are extracted")
+        if len(all_features) == 0:
+            raise ValueError("No features extracted from any images")
 
+        # Convert to numpy array
         all_features = np.array(all_features)
 
+        # Create and fit PCA model
+        logger.info("Fitting PCA model to features")
         pca = PCA()
         pca.fit(all_features)
         cumsum = np.cumsum(pca.explained_variance_ratio_)
         n_components = np.argmax(cumsum >= 0.90) + 1
 
-        pca = PCA(n_components=n_components)
-        features_pca = pca.fit_transform(all_features)
+        pca_model = PCA(n_components=n_components)
+        pca_model.fit(all_features)
 
-        logger.debug(f"original features vector: {all_features.shape[1]}")
-        logger.debug(f"after PCA: {n_components}")
-        logger.debug(f"Explain variance ratio: {sum(pca.explained_variance_ratio_):.4f}")
+        logger.info(f"Original feature dimensions: {all_features.shape[1]}")
+        logger.info(f"Reduced feature dimensions: {n_components}")
+        logger.info(f"Explained variance ratio: {sum(pca_model.explained_variance_ratio_):.4f}")
 
-        query_features_pca = features_pca[0]
-        database_features_pca = features_pca[1:]
+        # Save features and filenames to disk
+        logger.info("Saving features and filenames to cache files")
+        np.savez(FEATURES_CACHE_FILE, features=all_features)
+        with open(FILENAMES_CACHE_FILE, 'wb') as f:
+            pickle.dump(all_filenames, f)
+        with open(PCA_MODEL_CACHE_FILE, 'wb') as f:
+            pickle.dump(pca_model, f)
 
+        elapsed_time = time.time() - start_time
+        logger.info(f"Feature extraction completed in {elapsed_time:.2f} seconds")
+
+        return all_features, all_filenames, pca_model
+
+    except Exception as e:
+        logger.error(f"Error extracting features: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None, None
+
+
+def find_top_matches(query_image_data, bucket_name, database_prefix, top_n=10, force_refresh=False):
+    """
+    Find matches using edge features for pixel art from Google Cloud Storage
+    Using cached features if available
+    """
+    try:
+        # Get features for all images in database
+        database_features, database_filenames, pca_model = extract_all_gcs_features(
+            bucket_name, database_prefix, force_refresh)
+
+        if database_features is None or len(database_features) == 0:
+            logger.error("No database features available")
+            return []
+
+        # Extract features from query image
+        try:
+            query_features = extract_features_from_data(query_image_data)
+        except Exception as e:
+            logger.error(f"Error extracting query image features: {e}")
+            return []
+
+        # Apply PCA transformation
+        if pca_model is not None:
+            logger.debug("Applying PCA transformation")
+            query_features_pca = pca_model.transform([query_features])[0]
+            database_features_pca = pca_model.transform(database_features)
+        else:
+            # If no PCA model (shouldn't happen but just in case)
+            logger.warning("No PCA model available, using raw features")
+            query_features_pca = query_features
+            database_features_pca = database_features
+
+        # Calculate distances
         distances = [euclidean(query_features_pca, feat) for feat in database_features_pca]
+
+        # Find top matches
         top_indices = np.argsort(distances)[:top_n]
 
+        # Return top matches with file paths and distances
         matches = []
         for i in top_indices:
-            full_path = valid_files[i + 1]
+            full_path = database_filenames[i]
             filename = os.path.basename(full_path).replace("'", "").replace('"', "")
             matches.append((filename, distances[i]))
 
         return matches
 
     except Exception as e:
-        logger.error(f"Error when find matches: {str(e)}")
+        logger.error(f"Error finding matches: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return []
 
 
-def display_results(query_image_path, matches, database_path):
+def display_results(query_image_data, matches, bucket_name, gcs_prefix):
     """
     Display query image and matching results
     """
     # Read query image
-    query_img = cv2.imdecode(np.fromfile(str(query_image_path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    query_img = cv2.imdecode(np.frombuffer(query_image_data, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
     if query_img is None:
         print("Failed to read query image")
         return
@@ -373,12 +323,12 @@ def display_results(query_image_path, matches, database_path):
         alpha = query_img[:, :, 3] / 255.0
         query_img = cv2.cvtColor(query_img[:, :, :3], cv2.COLOR_BGR2RGB)
         query_img = (query_img * alpha[:, :, np.newaxis] + white_bg[:, :, np.newaxis] * (
-                    1 - alpha[:, :, np.newaxis])).astype(np.uint8)
+                1 - alpha[:, :, np.newaxis])).astype(np.uint8)
     elif query_img.shape[-1] == 3:
         query_img = cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB)
 
     # Resize query image to 48x48 for display
-        query_img = cv2.resize(query_img, (48, 48), interpolation=cv2.INTER_AREA)
+    query_img = cv2.resize(query_img, (48, 48), interpolation=cv2.INTER_AREA)
 
     # Calculate the number of rows and columns needed
     n_matches = min(len(matches), 10)  # Display max 10 matches
@@ -400,29 +350,22 @@ def display_results(query_image_path, matches, database_path):
     distances = [dist for _, dist in matches]
     max_dist = max(distances) if distances else 1
 
-    bucket_name = os.getenv('GCS_BUCKET_NAME')
-    gcs_prefix = os.getenv('GCS_DATABASE_PREFIX')
-
     # Display matching results
     for i, (name, dist) in enumerate(matches[:10], start=1):
-        if bucket_name:
-            clean_name = name.replace("'","").replace('"',"")
-            # download from GCS
-            storage_client = get_storage_client()
-            bucket = storage_client.bucket(bucket_name)
-            blob_path = f"{gcs_prefix}{clean_name}"
-            blob = bucket.blob(blob_path)
+        clean_name = name.replace("'", "").replace('"', "")
+        # download from GCS
+        storage_client = get_storage_client()
+        bucket = storage_client.bucket(bucket_name)
+        blob_path = f"{gcs_prefix}{clean_name}"
+        blob = bucket.blob(blob_path)
 
-            # download information of the image
-            try:
-                image_data = blob.download_as_bytes()
-                img = cv2.imdecode(np.frombuffer(image_data, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-            except Exception as e:
-                print(f"Error downloading {name}: {e}")
-                continue
-        else:
-            img_path = Path(database_path) / name
-            img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        # download information of the image
+        try:
+            image_data = blob.download_as_bytes()
+            img = cv2.imdecode(np.frombuffer(image_data, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        except Exception as e:
+            print(f"Error downloading {name}: {e}")
+            continue
 
         if img is None:
             continue
@@ -460,33 +403,51 @@ def display_results(query_image_path, matches, database_path):
 
 
 if __name__ == "__main__":
-    # default paths
-    default_database = r"C:\Users\李晓璇\Desktop\Semester 4\CS6123\project_3\spriters\Mixed"
-    default_query = r"C:\Users\李晓璇\Desktop\Semester 4\CS6123\project_3\scikit-image\test_dataset\test2.jpg"
-
-    # environment variables
+    # Get environment variables
     bucket_name = os.getenv('GCS_BUCKET_NAME')
     gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
+    force_refresh = os.getenv('FORCE_REFRESH_FEATURES', '').lower() in ('true', 'yes', '1')
 
-    if bucket_name:
-        print(f"\nUse Google Cloud Storage: gs://{bucket_name}/{gcs_prefix}")
-    else:
-        print(f"\nUse local directory: {default_database}")
+    if not bucket_name:
+        print("Error: GCS_BUCKET_NAME environment variable is required")
+        exit(1)
 
-    database_path = Path(default_database)
-    query_image = default_query
+    print(f"\nUsing Google Cloud Storage: gs://{bucket_name}/{gcs_prefix}")
 
-    print("\nProcessing query image:", Path(query_image).name)
+    # Preload all features
+    print("\nPreloading features from GCS bucket...")
+    features, filenames, _ = extract_all_gcs_features(bucket_name, gcs_prefix, force_refresh)
+    print(f"Loaded {len(features)} features from {len(filenames)} images")
 
-    matches = find_top_matches(query_image, database_path)
+    # Load query image
+    query_image_path = os.getenv('QUERY_IMAGE_PATH')
+    if not query_image_path:
+        print("Error: QUERY_IMAGE_PATH environment variable is required")
+        exit(1)
 
-    print("\nTop 10 matching images:")
-    distances = [dist for _, dist in matches]  # Get all distances
-    max_dist = max(distances) if distances else 1
-    for name, dist in matches:
-        # Convert distance to similarity score (1 - normalized_distance)
-        sim = 1 - (dist / max_dist) if dist > 0 else 1
-        print(f"{name}: {sim:.4f}")
+    try:
+        # Read query image data
+        with open(query_image_path, 'rb') as f:
+            query_image_data = f.read()
 
-    # Display matching results
-    display_results(query_image, matches, database_path)
+        print(f"\nProcessing query image: {os.path.basename(query_image_path)}")
+
+        # Find matches
+        matches = find_top_matches(query_image_data, bucket_name, gcs_prefix)
+
+        print("\nTop 10 matching images:")
+        distances = [dist for _, dist in matches]  # Get all distances
+        max_dist = max(distances) if distances else 1
+        for name, dist in matches:
+            # Convert distance to similarity score (1 - normalized_distance)
+            sim = 1 - (dist / max_dist) if dist > 0 else 1
+            print(f"{name}: {sim:.4f}")
+
+        # Display matching results
+        display_results(query_image_data, matches, bucket_name, gcs_prefix)
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        import traceback
+
+        print(traceback.format_exc())
