@@ -22,8 +22,7 @@ logger = logging.getLogger(__name__)
 # Add parent directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-scikit_image_dir = os.path.join(parent_dir, 'scikit-image')
-sys.path.append(scikit_image_dir)
+sys.path.append(parent_dir)
 sys.path.append(current_dir)  # Add current directory to Python path
 
 app = Flask(__name__)
@@ -36,6 +35,7 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 FEATURES_CACHE_FILE = os.path.join('/tmp', "gcs_features_cache.npz")
 FILENAMES_CACHE_FILE = os.path.join('/tmp', "gcs_filenames_cache.pkl")
 PCA_MODEL_CACHE_FILE = os.path.join('/tmp', "pca_model_cache.pkl")
+COMBINED_FEATURES_GCS_PATH = "combined_features.npy"
 
 # Create directories
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -44,6 +44,9 @@ os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 # Global variable to track if preloading has started
 preloading_started = False
 preloading_complete = False
+# Global variables for cached features and filenames
+cached_features = None
+cached_filenames = None
 
 
 def allowed_file(filename):
@@ -59,22 +62,91 @@ def get_relative_path(absolute_path):
         return absolute_path.replace('\\', '/')
 
 
+# Function to extract features from image data
+def extract_features_from_data(image_data):
+    """
+    Extract features from image data bytes
+    """
+    try:
+        # Convert image data to numpy array
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+
+        if img is None:
+            logger.error("Failed to decode image")
+            return None
+
+        # Calculate edge features
+        return calculate_image_features(img)
+    except Exception as e:
+        logger.error(f"Error extracting features: {str(e)}")
+        return None
+
+
+def calculate_image_features(image, num_blocks=4, num_bins=16):
+    """
+    Calculate image features: edge density and gradients
+    """
+    # Calculate edge density
+    height, width = image.shape
+    block_height, block_width = height // num_blocks, width // num_blocks
+    densities = []
+    for i in range(num_blocks):
+        for j in range(num_blocks):
+            block = image[i * block_height:(i + 1) * block_height, j * block_width:(j + 1) * block_width]
+            edges = cv2.Canny(block, 100, 200)
+            density = np.sum(edges) / (block_height * block_width)
+            densities.append(density)
+
+    # Calculate gradients
+    grad_x = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
+    magnitude, angle = cv2.cartToPolar(grad_x, grad_y, angleInDegrees=True)
+
+    grad_x_hist, _ = np.histogram(grad_x, bins=num_bins, range=(-255, 255))
+    grad_y_hist, _ = np.histogram(grad_y, bins=num_bins, range=(-255, 255))
+    orientation_hist, _ = np.histogram(angle, bins=num_bins, range=(0, 360))
+
+    # Combine all features into a single array
+    return np.concatenate([grad_x_hist, grad_y_hist, orientation_hist, np.array(densities)])
+
+
 # Function to preload features in background thread
 def preload_features():
-    global preloading_complete
+    global preloading_complete, cached_features, cached_filenames
 
     try:
-        bucket_name = os.getenv('GCS_BUCKET_NAME')
-        gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
+        bucket_name = os.getenv('GCS_BUCKET_NAME', 'svbearitems')
+        gcs_features_path = os.getenv('GCS_FEATURES_PATH', COMBINED_FEATURES_GCS_PATH)
 
         if bucket_name:
-            logger.info("Starting background preloading of features...")
+            logger.info(f"Starting background preloading of features from gs://{bucket_name}/{gcs_features_path}...")
 
-            # Import here to avoid circular imports
-            from onlyedge import extract_all_gcs_features
+            # Initialize GCS client
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(gcs_features_path)
 
-            # Extract features with force_refresh=False to use cache if available
-            extract_all_gcs_features(bucket_name, gcs_prefix, force_refresh=False)
+            # Download the combined features file
+            with tempfile.NamedTemporaryFile(delete=False) as temp:
+                temp_path = temp.name
+                blob.download_to_filename(temp_path)
+                logger.info(f"Downloaded combined features to {temp_path}")
+
+                # Load the combined features
+                combined_data = np.load(temp_path, allow_pickle=True).item()
+                cached_features = combined_data['features']
+                cached_filenames = combined_data['filenames']
+
+                logger.info(f"Loaded {len(cached_features)} feature vectors and {len(cached_filenames)} filenames")
+
+                # Clean up temp file
+                os.remove(temp_path)
+
+            # Save to local cache for future use
+            np.savez(FEATURES_CACHE_FILE, features=cached_features)
+            with open(FILENAMES_CACHE_FILE, 'wb') as f:
+                pickle.dump(cached_filenames, f)
 
             logger.info("Background preloading of features complete.")
             preloading_complete = True
@@ -112,7 +184,7 @@ def serve_image(filename):
         clean_filename = filename.replace("'", "").replace('"', "")
 
         # Get GCS configuration
-        bucket_name = os.getenv('GCS_BUCKET_NAME')
+        bucket_name = os.getenv('GCS_BUCKET_NAME', 'svbearitems')
         gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
         # Check if it is a GCS path
@@ -168,14 +240,25 @@ def find_matches_with_cached_features(query_features, top_n=10):
     """
     Find matches using pre-extracted features from cache
     """
+    global cached_features, cached_filenames
+
     try:
-        # Load features from cache
-        logger.debug("Loading features from cache")
-        features = np.load(FEATURES_CACHE_FILE)['features']
+        # Use global cached features if available
+        if cached_features is not None and cached_filenames is not None:
+            features = cached_features
+            filenames = cached_filenames
+        else:
+            # Try to load from local cache files
+            logger.debug("Loading features from local cache")
+            if os.path.exists(FEATURES_CACHE_FILE) and os.path.exists(FILENAMES_CACHE_FILE):
+                features = np.load(FEATURES_CACHE_FILE)['features']
+                with open(FILENAMES_CACHE_FILE, 'rb') as f:
+                    filenames = pickle.load(f)
+            else:
+                logger.error("Features cache not available")
+                return []
 
-        with open(FILENAMES_CACHE_FILE, 'rb') as f:
-            filenames = pickle.load(f)
-
+        # Check if PCA model exists
         if os.path.exists(PCA_MODEL_CACHE_FILE):
             with open(PCA_MODEL_CACHE_FILE, 'rb') as f:
                 pca_model = pickle.load(f)
@@ -228,39 +311,23 @@ def upload_file():
                 logger.debug(f"Saving file to: {filename}")
                 file.save(filename)
 
-                # Import required modules
-                try:
-                    from onlyedge import extract_features_from_data, find_top_matches
-                    logger.debug("Successfully imported onlyedge module")
-                except ImportError as e:
-                    logger.error(f"Failed to import modules: {str(e)}")
-                    return jsonify({'error': 'Module import error'}), 500
-
                 # Get GCS configuration
-                bucket_name = os.getenv('GCS_BUCKET_NAME')
+                bucket_name = os.getenv('GCS_BUCKET_NAME', 'svbearitems')
                 gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
 
                 # Read the file
                 with open(filename, 'rb') as f:
                     image_data = f.read()
 
-                # Check if features are already preloaded/cached
-                if (preloading_complete or
-                        (os.path.exists(FEATURES_CACHE_FILE) and
-                         os.path.exists(FILENAMES_CACHE_FILE))):
+                # Extract features from query image
+                query_features = extract_features_from_data(image_data)
 
-                    # Extract features from query image
-                    query_features = extract_features_from_data(image_data)
+                if query_features is None:
+                    return jsonify({'error': 'Failed to extract features from image'}), 500
 
-                    # Find matches using cached features
-                    matches = find_matches_with_cached_features(query_features)
-                    logger.debug(f"Found {len(matches)} matches using cached features")
-                else:
-                    # Use original function if cache not available
-                    logger.debug("Cache not available, using original function")
-                    # Set a low timeout to avoid worker timeout
-                    matches = find_top_matches(image_data, bucket_name, gcs_prefix, top_n=5)
-                    logger.debug(f"Found {len(matches)} matches")
+                # Find matches using cached features
+                matches = find_matches_with_cached_features(query_features)
+                logger.debug(f"Found {len(matches)} matches using cached features")
 
                 results = []
 
@@ -276,7 +343,7 @@ def upload_file():
                         else:
                             continue
 
-                    similarity = 1 - distance
+                    similarity = max(0, 1 - (distance / 10))  # Normalize similarity score
                     display_name = os.path.splitext(match_name)[0]
 
                     results.append({
@@ -308,7 +375,7 @@ if __name__ == '__main__':
     logger.info(f"Upload folder: {UPLOAD_FOLDER}")
     logger.info(f"Database path: {DATABASE_PATH}")
 
-    bucket_name = os.getenv('GCS_BUCKET_NAME')
+    bucket_name = os.getenv('GCS_BUCKET_NAME', 'svbearitems')
     if bucket_name:
         logger.info(f"Using GCS bucket: {bucket_name}")
         gcs_prefix = os.getenv('GCS_DATABASE_PREFIX', '')
