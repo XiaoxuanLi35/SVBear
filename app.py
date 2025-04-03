@@ -12,22 +12,22 @@ from google.cloud import storage
 import threading
 import pickle
 
-# Ensure directory exists
+# 确保目录存在
 os.makedirs('/tmp/database', exist_ok=True)
 
-# Configure logging
+# 配置日志
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Add parent directory to Python path
+# 添加父目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
-sys.path.append(current_dir)  # Add current directory to Python path
+sys.path.append(current_dir)  # 添加当前目录到Python路径
 
 app = Flask(__name__)
 
-# Configuration
+# 配置
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", os.path.join('/tmp', 'uploads'))
 DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join('/tmp', 'database'))
 LOCAL_TEMP_DIR = os.getenv("LOCAL_TEMP_DIR", os.path.join('/tmp', 'temp_files'))
@@ -37,14 +37,13 @@ FILENAMES_CACHE_FILE = os.path.join('/tmp', "gcs_filenames_cache.pkl")
 PCA_MODEL_CACHE_FILE = os.path.join('/tmp', "pca_model_cache.pkl")
 COMBINED_FEATURES_GCS_PATH = "combined_features.npy"
 
-# Create directories
+# 创建目录
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 
-# Global variable to track if preloading has started
+# 全局变量
 preloading_started = False
 preloading_complete = False
-# Global variables for cached features and filenames
 cached_features = None
 cached_filenames = None
 
@@ -54,7 +53,7 @@ def allowed_file(filename):
 
 
 def get_relative_path(absolute_path):
-    """Convert absolute path to relative path for URL generation"""
+    """转换绝对路径为相对路径用于URL生成"""
     try:
         rel_path = os.path.relpath(absolute_path, current_dir)
         return rel_path.replace('\\', '/')
@@ -62,109 +61,74 @@ def get_relative_path(absolute_path):
         return absolute_path.replace('\\', '/')
 
 
-# Function to extract features from image data
 def extract_features_from_data(image_data):
     """
-    Extract features from image data bytes
+    与onlyedge.py完全一致的特征提取流程
     """
     try:
-        # Convert image data to numpy array
+        # 1. 解码图像数据
         nparr = np.frombuffer(image_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
         if img is None:
             logger.error("Failed to decode image")
             return None
 
-        # Calculate edge features
-        return calculate_image_features(img)
+        # 2. 与第一个脚本完全一致的预处理
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # BGR转RGB
+        img = cv2.resize(img, (48, 48), interpolation=cv2.INTER_AREA)  # 固定48x48
+
+        # 3. 特征提取
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        # Canny边缘检测
+        edges = cv2.Canny(blurred, 100, 200)
+
+        # Sobel梯度计算
+        sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+
+        # 方向直方图(18维)
+        grad_dir = np.arctan2(sobely, sobelx) * 180 / np.pi
+        grad_mag = np.sqrt(sobelx ** 2 + sobely ** 2)
+        dir_hist = np.zeros(18)
+        for i in range(18):
+            lower = -180 + i * 20
+            upper = lower + 20
+            mask = (grad_dir >= lower) & (grad_dir < upper)
+            dir_hist[i] = np.sum(grad_mag[mask])
+        dir_hist /= (np.sum(dir_hist) + 1e-6)
+
+        # X/Y梯度直方图(各9维)
+        x_hist = np.histogram(sobelx.flatten(), bins=9, range=[-1, 1])[0]
+        y_hist = np.histogram(sobely.flatten(), bins=9, range=[-1, 1])[0]
+        x_hist /= (np.sum(x_hist) + 1e-6)
+        y_hist /= (np.sum(y_hist) + 1e-6)
+
+        # 边缘密度(36维)
+        block_size = 8
+        h, w = edges.shape
+        density_map = np.zeros((h // block_size, w // block_size))
+        for i in range(h // block_size):
+            for j in range(w // block_size):
+                block = edges[i * block_size:(i + 1) * block_size,
+                        j * block_size:(j + 1) * block_size]
+                density_map[i, j] = np.sum(block > 0) / (block_size ** 2)
+        edge_density = density_map.flatten()
+
+        # 合并特征(72维)
+        features = np.concatenate([dir_hist, x_hist, y_hist, edge_density])
+
+        # L2归一化
+        features /= np.linalg.norm(features)
+
+        return features
+
     except Exception as e:
-        logger.error(f"Error extracting features: {str(e)}")
+        logger.error(f"特征提取错误: {str(e)}")
         return None
 
 
-def calculate_image_features(image):
-    """
-    使用与onlyedge.py一致的特征提取方法
-    """
-    # 确保输入图像是RGB格式？
-    if len(image.shape) == 2:  # 如果是灰度图，转换为RGB
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-
-    # 转换为灰度图
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-    # 边缘检测参数
-    ksize = 3
-    threshold1 = 100
-    threshold2 = 200
-    direction_bins = 18
-
-    # 应用高斯模糊减少噪声
-    blurred = cv2.GaussianBlur(gray, (ksize, ksize), 0)
-
-    # Canny边缘检测
-    edges = cv2.Canny(blurred, threshold1, threshold2)
-
-    # 计算Sobel梯度
-    sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=ksize)
-    sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=ksize)
-
-    # 计算梯度方向和幅度
-    gradient_direction = np.arctan2(sobely, sobelx) * 180 / np.pi  # 范围: [-180, 180]
-    gradient_magnitude = np.sqrt(sobelx ** 2 + sobely ** 2)
-
-    # 创建非旋转不变梯度直方图
-    direction_range = [-180, 180]
-    direction_step = 360 / direction_bins
-    direction_hist = np.zeros(direction_bins)
-
-    for i in range(direction_bins):
-        lower = direction_range[0] + i * direction_step
-        upper = lower + direction_step
-        mask = (gradient_direction >= lower) & (gradient_direction < upper)
-        direction_hist[i] = np.sum(gradient_magnitude[mask])
-
-    # 归一化方向直方图
-    direction_hist = direction_hist / (np.sum(direction_hist) + 1e-6)
-
-    # 计算X和Y梯度特征
-    x_gradient_hist = np.histogram(sobelx.flatten(), bins=direction_bins // 2, range=[-1, 1])[0]
-    y_gradient_hist = np.histogram(sobely.flatten(), bins=direction_bins // 2, range=[-1, 1])[0]
-
-    # 归一化X和Y梯度直方图
-    x_gradient_hist = x_gradient_hist / (np.sum(x_gradient_hist) + 1e-6)
-    y_gradient_hist = y_gradient_hist / (np.sum(y_gradient_hist) + 1e-6)
-
-    # 计算边缘密度
-    block_size = 8
-    h, w = edges.shape
-    blocks_h = h // block_size
-    blocks_w = w // block_size
-    density_map = np.zeros((blocks_h, blocks_w))
-
-    for i in range(blocks_h):
-        for j in range(blocks_w):
-            block = edges[i * block_size:(i + 1) * block_size, j * block_size:(j + 1) * block_size]
-            density_map[i, j] = np.sum(block > 0) / (block_size * block_size)
-
-    edge_density = density_map.flatten()
-
-    # 合并所有边缘特征
-    return np.concatenate([
-        direction_hist,  # 非旋转不变梯度方向
-        x_gradient_hist,  # X梯度分布
-        y_gradient_hist,  # Y梯度分布
-        edge_density  # 边缘密度特征
-    ])
-
-    # 归一化特征向量
-    #features = features / (np.linalg.norm(features) + 1e-10)
-
-    #return features
-
-
-# Function to preload features in background thread
 def preload_features():
     global preloading_complete, cached_features, cached_filenames
 
