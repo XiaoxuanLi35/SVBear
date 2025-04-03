@@ -87,7 +87,7 @@ def calculate_image_features(image):
     """
     使用与onlyedge.py一致的特征提取方法
     """
-    # 确保输入图像是RGB格式
+    # 确保输入图像是RGB格式？
     if len(image.shape) == 2:  # 如果是灰度图，转换为RGB
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
 
@@ -151,7 +151,7 @@ def calculate_image_features(image):
     edge_density = density_map.flatten()
 
     # 合并所有边缘特征
-    features = np.concatenate([
+    return np.concatenate([
         direction_hist,  # 非旋转不变梯度方向
         x_gradient_hist,  # X梯度分布
         y_gradient_hist,  # Y梯度分布
@@ -159,9 +159,9 @@ def calculate_image_features(image):
     ])
 
     # 归一化特征向量
-    features = features / (np.linalg.norm(features) + 1e-10)
+    #features = features / (np.linalg.norm(features) + 1e-10)
 
-    return features
+    #return features
 
 
 # Function to preload features in background thread
