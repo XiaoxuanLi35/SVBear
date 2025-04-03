@@ -63,7 +63,7 @@ def get_relative_path(absolute_path):
 
 def extract_features_from_data(image_data):
     """
-    与onlyedge.py完全一致的特征提取流程
+    与onlyedge.py完全一致的特征提取流程（修正版）
     """
     try:
         # 1. 解码图像数据
@@ -73,25 +73,23 @@ def extract_features_from_data(image_data):
             logger.error("Failed to decode image")
             return None
 
-        # 2. 与第一个脚本完全一致的预处理
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # BGR转RGB
-        img = cv2.resize(img, (48, 48), interpolation=cv2.INTER_AREA)  # 固定48x48
+        # 2. 预处理
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img, (48, 48), interpolation=cv2.INTER_AREA)
 
         # 3. 特征提取
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-
-        # Canny边缘检测
         edges = cv2.Canny(blurred, 100, 200)
 
-        # Sobel梯度计算
+        # Sobel梯度
         sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
         sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
 
         # 方向直方图(18维)
         grad_dir = np.arctan2(sobely, sobelx) * 180 / np.pi
         grad_mag = np.sqrt(sobelx ** 2 + sobely ** 2)
-        dir_hist = np.zeros(18)
+        dir_hist = np.zeros(18, dtype=np.float64)
         for i in range(18):
             lower = -180 + i * 20
             upper = lower + 20
@@ -100,32 +98,33 @@ def extract_features_from_data(image_data):
         dir_hist /= (np.sum(dir_hist) + 1e-6)
 
         # X/Y梯度直方图(各9维)
-        x_hist = np.histogram(sobelx.flatten(), bins=9, range=[-1, 1])[0]
-        y_hist = np.histogram(sobely.flatten(), bins=9, range=[-1, 1])[0]
+        x_hist = np.histogram(sobelx.flatten(), bins=9, range=[-1, 1])[0].astype(np.float64)
+        y_hist = np.histogram(sobely.flatten(), bins=9, range=[-1, 1])[0].astype(np.float64)
         x_hist /= (np.sum(x_hist) + 1e-6)
         y_hist /= (np.sum(y_hist) + 1e-6)
 
-        # 边缘密度(36维)
+        # 边缘密度(36维) - 向量化计算
         block_size = 8
         h, w = edges.shape
-        density_map = np.zeros((h // block_size, w // block_size))
-        for i in range(h // block_size):
-            for j in range(w // block_size):
-                block = edges[i * block_size:(i + 1) * block_size,
-                        j * block_size:(j + 1) * block_size]
-                density_map[i, j] = np.sum(block > 0) / (block_size ** 2)
+        h = (h // block_size) * block_size
+        w = (w // block_size) * block_size
+        edges = edges[:h, :w]
+
+        reshaped = edges.reshape(h // block_size, block_size, w // block_size, block_size)
+        density_map = np.mean(reshaped > 0, axis=(1, 3)).astype(np.float64)
         edge_density = density_map.flatten()
 
         # 合并特征(72维)
         features = np.concatenate([dir_hist, x_hist, y_hist, edge_density])
 
         # L2归一化
-        features /= np.linalg.norm(features)
+        norm = np.linalg.norm(features)
+        features = features / norm if norm > 0 else features
 
         return features
 
     except Exception as e:
-        logger.error(f"特征提取错误: {str(e)}")
+        logger.error(f"特征提取错误: {str(e)}\n{traceback.format_exc()}")
         return None
 
 
@@ -335,6 +334,13 @@ def upload_file():
                 # Read the file
                 with open(filename, 'rb') as f:
                     image_data = f.read()
+
+                    # 资源清理
+                    try:
+                        os.remove(filename)
+                        logger.debug(f"Temporary file {filename} removed")
+                    except Exception as e:
+                        logger.warning(f"Could not remove temp file {filename}: {str(e)}")
 
                 # Extract features from query image
                 query_features = extract_features_from_data(image_data)
