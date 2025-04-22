@@ -40,9 +40,9 @@ def get_storage_client():
 
 
 def extract_edge_features(image):
-    """
-    Extract edge features using rotation-sensitive gradient features.
-    """
+
+    # Extract edge features using rotation-sensitive gradient features.
+
     # Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
