@@ -12,22 +12,22 @@ from google.cloud import storage
 import threading
 import pickle
 
-# 确保目录存在
+# Ensure the path exists
 os.makedirs('/tmp/database', exist_ok=True)
 
-# 配置日志
+# log of the configuration
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# 添加父目录到Python路径
+# Add parent path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
-sys.path.append(current_dir)  # 添加当前目录到Python路径
+sys.path.append(current_dir)
 
 app = Flask(__name__)
 
-# 配置
+# Configuration
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", os.path.join('/tmp', 'uploads'))
 DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join('/tmp', 'database'))
 LOCAL_TEMP_DIR = os.getenv("LOCAL_TEMP_DIR", os.path.join('/tmp', 'temp_files'))
@@ -37,11 +37,9 @@ FILENAMES_CACHE_FILE = os.path.join('/tmp', "gcs_filenames_cache.pkl")
 PCA_MODEL_CACHE_FILE = os.path.join('/tmp', "pca_model_cache.pkl")
 COMBINED_FEATURES_GCS_PATH = "combined_features.npy"
 
-# 创建目录
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 
-# 全局变量
 preloading_started = False
 preloading_complete = False
 cached_features = None
@@ -53,7 +51,7 @@ def allowed_file(filename):
 
 
 def get_relative_path(absolute_path):
-    """转换绝对路径为相对路径用于URL生成"""
+    """Transform absolute path tp relative path to generate url"""
     try:
         rel_path = os.path.relpath(absolute_path, current_dir)
         return rel_path.replace('\\', '/')
@@ -62,31 +60,29 @@ def get_relative_path(absolute_path):
 
 
 def extract_features_from_data(image_data):
-    """
-    与onlyedge.py完全一致的特征提取流程（修正版）
-    """
+
     try:
-        # 1. 解码图像数据
+        # Decode images
         nparr = np.frombuffer(image_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             logger.error("Failed to decode image")
             return None
 
-        # 2. 预处理
+        # preprocessing
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (48, 48), interpolation=cv2.INTER_AREA)
 
-        # 3. 特征提取
+        # features extraction
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         edges = cv2.Canny(blurred, 100, 200)
 
-        # Sobel梯度
+        # Sobel gradient
         sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
         sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
 
-        # 方向直方图(18维)
+        # non-rotation-invariant directional gradient histogram
         grad_dir = np.arctan2(sobely, sobelx) * 180 / np.pi
         grad_mag = np.sqrt(sobelx ** 2 + sobely ** 2)
         dir_hist = np.zeros(18, dtype=np.float64)
@@ -97,13 +93,13 @@ def extract_features_from_data(image_data):
             dir_hist[i] = np.sum(grad_mag[mask])
         dir_hist /= (np.sum(dir_hist) + 1e-6)
 
-        # X/Y梯度直方图(各9维)
+        # X gradient distribution (9 dimensions), Y gradient distribution (9 dimensions)
         x_hist = np.histogram(sobelx.flatten(), bins=9, range=[-1, 1])[0].astype(np.float64)
         y_hist = np.histogram(sobely.flatten(), bins=9, range=[-1, 1])[0].astype(np.float64)
         x_hist /= (np.sum(x_hist) + 1e-6)
         y_hist /= (np.sum(y_hist) + 1e-6)
 
-        # 边缘密度(36维) - 向量化计算
+        # edge density map(36 dimensions)
         block_size = 8
         h, w = edges.shape
         h = (h // block_size) * block_size
@@ -114,17 +110,16 @@ def extract_features_from_data(image_data):
         density_map = np.mean(reshaped > 0, axis=(1, 3)).astype(np.float64)
         edge_density = density_map.flatten()
 
-        # 合并特征(72维)
+        # combine all features
         features = np.concatenate([dir_hist, x_hist, y_hist, edge_density])
 
-        # L2归一化
         norm = np.linalg.norm(features)
         features = features / norm if norm > 0 else features
 
         return features
 
     except Exception as e:
-        logger.error(f"特征提取错误: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"error when extract features: {str(e)}\n{traceback.format_exc()}")
         return None
 
 
@@ -335,7 +330,7 @@ def upload_file():
                 with open(filename, 'rb') as f:
                     image_data = f.read()
 
-                    # 资源清理
+                    # remove temporary files
                     try:
                         os.remove(filename)
                         logger.debug(f"Temporary file {filename} removed")
