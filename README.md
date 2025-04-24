@@ -11,7 +11,7 @@ A web application that helps players identify items requested by the Trash Bear 
 
 ## 🌐 Demo
 
-🚀 [Live Demo on Render](https://svbear.onrender.com/) *(replace with your real link)*
+🚀 [Live Demo on Render](https://svbear.onrender.com/)
 
 ## 🖼️ Screenshots
 
